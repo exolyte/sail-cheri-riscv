@@ -45,6 +45,7 @@ type CapAddrInt   = range(0, (2 ^ cap_addr_width) - 1)
 type CapLenBits   = bits(cap_len_width)
 type CapLen       = range(0, (2 ^ cap_len_width))
 type CapPermsBits = bits(cap_perms_width)
+type CapLinearBit = bits(cap_linear_width)
 type CapFlagsBits = bits(cap_flags_width)
 
 /* Reset E and T calculated to make top 2**xlen. */
@@ -72,6 +73,7 @@ struct Capability = {
   permit_execute         : bool,
   global                 : bool,
   reserved               : bits(cap_reserved_width),
+  linear                 : bool,
   flag_cap_mode          : bool,
   internal_E             : bool,
   E                      : bits(cap_E_width),
@@ -97,6 +99,7 @@ let null_cap : Capability = struct {
   permit_execute         = false,
   global                 = false,
   reserved               = zeros(),
+  linear                 = false,
   flag_cap_mode          = false,
   internal_E             = true,
   E                      = cap_reset_E,
@@ -122,6 +125,7 @@ let default_cap : Capability = struct {
   permit_execute         = true,
   global                 = true,
   reserved               = zeros(),
+  linear                 = false,
   flag_cap_mode          = false,
   internal_E             = true,
   E                      = cap_reset_E,
@@ -187,6 +191,7 @@ function encCapabilityToCapability(t,c) : (bool, EncCapability) -> Capability = 
     permit_execute         = bit_to_bool(c.perms[1]),
     global                 = bit_to_bool(c.perms[0]),
     reserved               = c.reserved,
+    linear                 = if cap_linear_width > 0 then bit_to_bool(c.linear[0]) else false,
     flag_cap_mode          = bit_to_bool(c.flags[0]),
     internal_E             = internal_E,
     E                      = E,
@@ -211,6 +216,7 @@ function capToEncCap(cap) : Capability -> EncCapability = {
   return struct {
     perms = cap.uperms @ getCapHardPerms(cap),
     reserved = cap.reserved,
+    linear = if cap_linear_width > 0 then bool_to_bits(cap.linear) else zeros(),
     flags = bool_to_bits(cap.flag_cap_mode),
     otype = cap.otype,
     internal_E = bool_to_bits(cap.internal_E)[0],
@@ -364,6 +370,15 @@ function setCapPerms(cap, perms) : (Capability, CapPermsBits) -> Capability =
       global                 = bit_to_bool(perms[0])
       }
 
+val getCapLinearity : Capability -> CapLinearBit
+function getCapLinearity(cap) = if cap_linear_width > 0 then bool_to_bits(cap.linear) else zeros()
+
+val setCapLinearity : (Capability, CapLinearBit) -> Capability
+function setCapLinearity(cap, linearity) =
+    { cap with linear = if cap_linear_width > 0 then
+                        bit_to_bool(linearity[0]) else
+                        false}
+
 /*!
  * Gets the architecture specific capability flags for given capability.
  */
@@ -513,13 +528,15 @@ function capToString (cap) = {
   concat_str(if isCapSealed(cap) then "1" else "0",
   concat_str(" perms:",
   concat_str(BitStr(0b0 @ getCapPerms(cap)),
+  concat_str(" linear:",
+  concat_str(if cap.linear then "1" else "0",
   concat_str(" type:",
   concat_str(BitStr(otype64),
   concat_str(" offset:",
   concat_str(BitStr(getCapOffsetBits(cap)),
   concat_str(" base:",
   concat_str(BitStr(getCapBaseBits(cap)),
-  concat_str(" length:", len_str)))))))))))))
+  concat_str(" length:", len_str)))))))))))))))
 }
 function getRepresentableAlignmentMask(len) : xlenbits -> xlenbits = {
   let (exact, c) = setCapBounds(default_cap, to_bits(sizeof(xlen), 0), 0b0 @ len);

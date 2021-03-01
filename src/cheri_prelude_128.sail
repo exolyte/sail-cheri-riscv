@@ -45,8 +45,10 @@ type cap_uperms_width : Int = 4
 let  cap_uperms_width = sizeof(cap_uperms_width)
 type cap_otype_width : Int = 18
 let  cap_otype_width = sizeof(cap_otype_width)
-type cap_reserved_width : Int = 2
+type cap_reserved_width : Int = 1
 let  cap_reserved_width = sizeof(cap_reserved_width)
+type cap_linear_width : Int = 1
+let  cap_linear_width = sizeof(cap_linear_width)
 type cap_flags_width : Int = 1
 let  cap_flags_width = sizeof(cap_flags_width)
 type cap_mantissa_width : Int = 14
@@ -70,6 +72,7 @@ struct EncCapability = {
   perms      : bits(cap_uperms_width + cap_hperms_width),
   otype      : bits(cap_otype_width),
   reserved   : bits(cap_reserved_width),
+  linear     : bits(cap_linear_width),
   flags      : bits(cap_flags_width),
   internal_E : bit,
   T          : bits(cap_mantissa_width - 2),
@@ -79,7 +82,8 @@ struct EncCapability = {
 
 function capBitsToEncCapability(c) : CapBits -> EncCapability = struct {
   perms      = c[127..112],
-  reserved   = c[111..110],
+  reserved   = c[111..111],
+  linear     = c[110..110],
   flags      = c[109..109],
   otype      = c[108..91],
   internal_E = c[90],
@@ -91,6 +95,7 @@ function capBitsToEncCapability(c) : CapBits -> EncCapability = struct {
 function encCapToBits(cap) : EncCapability -> CapBits =
   cap.perms @
   cap.reserved @
+  cap.linear @
   cap.flags @
   cap.otype @
   [cap.internal_E] @
