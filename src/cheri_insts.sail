@@ -174,6 +174,10 @@ union clause ast = CSpecialRW : (regidx, screg, regidx)
  *   register proves to be overly problematic for software. For U-mode
  *   transitions to domains without **Permit_Access_System_Registers** only
  *   **DDC** should need clearing, which can be done with [CClear].
+ *
+ * - If *cs1* is not **C0** and has its linear bit set, its tag will be unset.
+ *   If *scr* has its linear bit set and *cs1* is is **C0**, the tag of *scr*
+ *   will be unset.
  */
 function clause execute (CSpecialRW(cd, scr, cs1)) = {
   let (specialExists, ro, priv, needASR) : (bool, bool, Privilege, bool) = match unsigned(scr) {
@@ -203,7 +207,7 @@ function clause execute (CSpecialRW(cd, scr, cs1)) = {
     RETIRE_FAIL
   } else {
     let cs1_val = C(cs1);
-    C(cd) = match unsigned(scr) {
+    let scr_val : Capability = match unsigned(scr) {
       0  => {
         let (success, pcc) = setCapAddr(PCC, PC);
         assert (success, "PCC with offset PC should always be representable");
@@ -224,6 +228,7 @@ function clause execute (CSpecialRW(cd, scr, cs1)) = {
       31 => legalize_epcc(MEPCC),
       _  => {assert(false, "unreachable"); undefined}
     };
+    C(cd) = scr_val;
     if (cs1 != zeros()) then {
       match unsigned(scr) {
         1  => DDC = cs1_val,
@@ -240,7 +245,26 @@ function clause execute (CSpecialRW(cd, scr, cs1)) = {
         30 => MScratchC = cs1_val,
         31 => MEPCC = cs1_val,
         _  => assert(false, "unreachable")
-      }
+      };
+      if cs1_val.linear then 
+        C(cs1) = invalidateCap(cs1_val)
+    } else if scr_val.linear then {
+      match unsigned(scr) {
+        1  => DDC = invalidateCap(scr_val),
+        4  => UTCC = legalize_tcc(UTCC, invalidateCap(scr_val)),
+        5  => UTDC = invalidateCap(scr_val),
+        6  => UScratchC = invalidateCap(scr_val),
+        7  => UEPCC = invalidateCap(scr_val),
+        12 => STCC = legalize_tcc(STCC, invalidateCap(scr_val)),
+        13 => STDC = invalidateCap(scr_val),
+        14 => SScratchC = invalidateCap(scr_val),
+        15 => SEPCC = invalidateCap(scr_val),
+        28 => MTCC = legalize_tcc(MTCC, invalidateCap(scr_val)),
+        29 => MTDC = invalidateCap(scr_val),
+        30 => MScratchC = invalidateCap(scr_val),
+        31 => MEPCC = invalidateCap(scr_val),
+        _  => assert(false, "unreachable")
+      };
     };
     RETIRE_SUCCESS
   }
@@ -259,6 +283,7 @@ union clause ast = CAndPerm : (regidx, regidx, regidx)
  * An exception is raised if:
  *   - *cs1*.**tag** is not set.
  *   - *cs1*.**tag** is set and *cs1* is sealed.
+ *   - *cs1*.**linear** is set and *cs1* $\ne$ *cd*.
  */
 function clause execute(CAndPerm(cd, cs1, rs2)) = {
   let cs1_val = C(cs1);
@@ -268,6 +293,9 @@ function clause execute(CAndPerm(cd, cs1, rs2)) = {
     RETIRE_FAIL
   } else if isCapSealed(cs1_val) then {
     handle_cheri_reg_exception(CapEx_SealViolation, cs1);
+    RETIRE_FAIL
+  } else if cs1_val.linear & (cd != cs1) then {
+    handle_cheri_reg_exception(CapEx_LinearityViolation, cs1);
     RETIRE_FAIL
   } else {
     let perms = getCapPerms(cs1_val);
@@ -288,12 +316,16 @@ union clause ast = CSetFlags : (regidx, regidx, regidx)
  *
  * An exception is raised if:
  *   - *cs1*.**tag** is set and *cs1* is sealed.
+ *   - *cs1*.**linear** is set and *cs1* $\ne$ *cd*.
  */
 function clause execute(CSetFlags(cd, cs1, rs2)) = {
   let cs1_val = C(cs1);
   let rs2_val = X(rs2);
   if cs1_val.tag & isCapSealed(cs1_val) then {
     handle_cheri_reg_exception(CapEx_SealViolation, cs1);
+    RETIRE_FAIL
+  } else if cs1_val.linear & (cd != cs1) then {
+    handle_cheri_reg_exception(CapEx_LinearityViolation, cs1);
     RETIRE_FAIL
   } else {
     let newCap = setCapFlags(cs1_val, truncate(rs2_val, cap_flags_width));
@@ -363,12 +395,16 @@ union clause ast = CIncOffset : (regidx, regidx, regidx)
  *
  * An exception is raised if:
  *   - *cs1*.**tag** is set and *cs1* is sealed.
+ *   - *cs1*.**linear** is set and *cs1* $\ne$ *cd*.
  */
 function clause execute (CIncOffset(cd, cs1, rs2)) = {
   let cs1_val = C(cs1);
   let rs2_val = X(rs2);
   if cs1_val.tag & isCapSealed(cs1_val) then {
     handle_cheri_reg_exception(CapEx_SealViolation, cs1);
+    RETIRE_FAIL
+  } else if cs1_val.linear & (cd != cs1) then {
+    handle_cheri_reg_exception(CapEx_LinearityViolation, cs1);
     RETIRE_FAIL
   } else {
     let (success, newCap) = incCapOffset(cs1_val, rs2_val);
@@ -393,12 +429,16 @@ union clause ast = CIncOffsetImmediate : (regidx, regidx, bits(12))
  *
  * An exception is raised if:
  *   - *cs1*.**tag** is set and *cs1* is sealed.
+ *   - *cs1*.**linear** is set and *cs1* $\ne$ *cd*.
  */
 function clause execute (CIncOffsetImmediate(cd, cs1, imm)) = {
   let cs1_val = C(cs1);
   let immBits : xlenbits = EXTS(imm);
   if cs1_val.tag & isCapSealed(cs1_val) then {
     handle_cheri_reg_exception(CapEx_SealViolation, cs1);
+    RETIRE_FAIL
+  } else if cs1_val.linear & (cd != cs1) then {
+    handle_cheri_reg_exception(CapEx_LinearityViolation, cs1);
     RETIRE_FAIL
   } else {
     let (success, newCap) = incCapOffset(cs1_val, immBits);
@@ -422,12 +462,16 @@ union clause ast = CSetOffset : (regidx, regidx, regidx)
  *
  * An exception is raised if:
  *   - *cs1*.**tag** is set and *cs1* is sealed.
+ *   - *cs1*.**linear** is set and *cs1* $\ne$ *cd*.
  */
 function clause execute (CSetOffset(cd, cs1, rs2)) = {
   let cs1_val = C(cs1);
   let rs2_val = X(rs2);
   if cs1_val.tag & isCapSealed(cs1_val) then {
     handle_cheri_reg_exception(CapEx_SealViolation, cs1);
+    RETIRE_FAIL
+  } else if cs1_val.linear & (cd != cs1) then {
+    handle_cheri_reg_exception(CapEx_LinearityViolation, cs1);
     RETIRE_FAIL
   } else {
     let (success, newCap) = setCapOffset(cs1_val, rs2_val);
@@ -451,12 +495,16 @@ union clause ast = CSetAddr : (regidx, regidx, regidx)
  *
  * An exception is raised if:
  *   - *cs1*.**tag** is set and *cs1* is sealed.
+ *   - *cs1*.**linear** is set and *cs1* $\ne$ *cd*.
  */
 function clause execute (CSetAddr(cd, cs1, rs2)) = {
   let cs1_val = C(cs1);
   let rs2_val = X(rs2);
   if cs1_val.tag & isCapSealed(cs1_val) then {
     handle_cheri_reg_exception(CapEx_SealViolation, cs1);
+    RETIRE_FAIL
+  } else if cs1_val.linear & (cd != cs1) then {
+    handle_cheri_reg_exception(CapEx_LinearityViolation, cs1);
     RETIRE_FAIL
   } else {
     let (representable, newCap) = setCapAddr(cs1_val, rs2_val);
@@ -486,6 +534,7 @@ union clause ast = CSetBounds : (regidx, regidx, regidx)
  *   - *cs1* is sealed.
  *   - *cs1*.**address** $\lt$ *cs1*.**base**.
  *   - *cs1*.**address** $+$ *rs2* $\gt$ *cs1*.**top**.
+ *   - *cs1*.**linear** is set and *cs1* $\ne$ *cd*.
  */
 function clause execute (CSetBounds(cd, cs1, rs2)) = {
   let cs1_val = C(cs1);
@@ -500,6 +549,9 @@ function clause execute (CSetBounds(cd, cs1, rs2)) = {
     RETIRE_FAIL
   } else if not(inCapBounds(cs1_val, newBase, unsigned(rs2_val))) then {
     handle_cheri_reg_exception(CapEx_LengthViolation, cs1);
+    RETIRE_FAIL
+  } else if cs1_val.linear & (cd != cs1) then {
+    handle_cheri_reg_exception(CapEx_LinearityViolation, cs1);
     RETIRE_FAIL
   } else {
     let (_, newCap) = setCapBounds(cs1_val, newBase, newTop);
@@ -524,6 +576,7 @@ union clause ast = CSetBoundsImmediate : (regidx, regidx, bits(12))
  *   - *cs1* is sealed.
  *   - *cs1*.**address** $\lt$ *cs1*.**base**.
  *   - *cs1*.**address** $+$ *uimm* $\gt$ *cs1*.**top**.
+ *   - *cs1*.**linear** is set and *cs1* $\ne$ *cd*.
  */
 function clause execute (CSetBoundsImmediate(cd, cs1, uimm)) = {
   let cs1_val = C(cs1);
@@ -537,6 +590,9 @@ function clause execute (CSetBoundsImmediate(cd, cs1, uimm)) = {
     RETIRE_FAIL
   } else if not(inCapBounds(cs1_val, newBase, unsigned(uimm))) then {
     handle_cheri_reg_exception(CapEx_LengthViolation, cs1);
+    RETIRE_FAIL
+  } else if cs1_val.linear & (cd != cs1) then {
+    handle_cheri_reg_exception(CapEx_LinearityViolation, cs1);
     RETIRE_FAIL
   } else {
     let (_, newCap) = setCapBounds(cs1_val, newBase, newTop);
@@ -560,6 +616,7 @@ union clause ast = CSetBoundsExact : (regidx, regidx, regidx)
  *   - *cs1*.**address** $\lt$ *cs1*.**base**.
  *   - *cs1*.**address** $+$ *rs2* $\gt$ *cs1*.**top**.
  *   - The resulting capability cannot be represented exactly.
+ *   - *cs1*.**linear** is set and *cs1* $\ne$ *cd*.
  */
 function clause execute (CSetBoundsExact(cd, cs1, rs2)) = {
   let cs1_val = C(cs1);
@@ -574,6 +631,9 @@ function clause execute (CSetBoundsExact(cd, cs1, rs2)) = {
     RETIRE_FAIL
   } else if not(inCapBounds(cs1_val, newBase, unsigned(rs2_val))) then {
     handle_cheri_reg_exception(CapEx_LengthViolation, cs1);
+    RETIRE_FAIL
+  } else if cs1_val.linear & (cd != cs1) then {
+    handle_cheri_reg_exception(CapEx_LinearityViolation, cs1);
     RETIRE_FAIL
   } else {
     let (exact, newCap) = setCapBounds(cs1_val, newBase, newTop);
@@ -601,9 +661,18 @@ function clause execute (CClearTag(cd, cs1)) = {
 union clause ast = CMove : (regidx, regidx)
 /*!
  * Capability register *cd* is replaced with the contents of *cs1*.
+ *
+ * ## Notes
+ *
+ * - If the source register's linear bit is set, its tag will be
+ * cleared, except if the source and destination registers are equal.
+ * This exception allows this instruction to be a NOP when source and
+ * destination are equal.
  */
 function clause execute (CMove(cd, cs1)) = {
-  C(cd) = C(cs1);
+  let cs1_val = C(cs1);
+  C(cd) = cs1_val;
+  if cs1_val.linear & (cd != cs1) then C(cs1) = invalidateCap(cs1_val);
   RETIRE_SUCCESS
 }
 
@@ -698,6 +767,7 @@ union clause ast = CFromPtr : (regidx, regidx, regidx)
  * An exception is raised if:
  *   - *cs1*.**tag** is not set.
  *   - *cs1* is sealed.
+ *   - *cs1*.**linear** is set and *cs1* $\ne$ *cd*.
  */
 function clause execute (CFromPtr(cd, cs1, rs2)) = {
   let cs1_val = if unsigned(cs1) == 0 then DDC else C(cs1);
@@ -710,6 +780,9 @@ function clause execute (CFromPtr(cd, cs1, rs2)) = {
     RETIRE_FAIL
   } else if isCapSealed(cs1_val) then {
     handle_cheri_reg_exception(CapEx_SealViolation, cs1);
+    RETIRE_FAIL
+  } else if cs1_val.linear & (cd != cs1) then {
+    handle_cheri_reg_exception(CapEx_LinearityViolation, cs1);
     RETIRE_FAIL
   } else {
     let (success, newCap) = setCapOffset(cs1_val, rs2_val);
@@ -740,6 +813,7 @@ union clause ast = CBuildCap : (regidx, regidx, regidx)
  *     *cs1*.**perms**.
  *   - *cs2*.**uperms** grants a permission that is not granted by
  *     *cs1*.**uperms**.
+ *   - *cs1*.**linear** is set and *cs1* $\ne$ *cd*.
  *
  * ## Notes
  *
@@ -774,6 +848,9 @@ function clause execute (CBuildCap(cd, cs1, cs2)) = {
   } else if (cs2_perms & cs1_perms) != cs2_perms then {
     handle_cheri_reg_exception(CapEx_UserDefViolation, cs1);
     RETIRE_FAIL
+  } else if cs1_val.linear & (cd != cs1) then {
+    handle_cheri_reg_exception(CapEx_LinearityViolation, cs1);
+    RETIRE_FAIL
   } else {
     let (exact, cd1) = setCapBounds(cs1_val, to_bits(cap_addr_width, cs2_base), to_bits(cap_len_width, cs2_top));
     let (_, cd2) = setCapOffset(cd1, getCapOffsetBits(cs2_val)); // Ignore representability check, since Fast Rep Check not relevant
@@ -807,6 +884,7 @@ union clause ast = CCopyType : (regidx, regidx, regidx)
  *   - *cs1* is sealed.
  *   - *cs2*.**otype** $\lt$ *cs1*.**base**.
  *   - *cs2*.**otype** $\ge$ *cs1*.**top**.
+ *   - *cs1*.**linear** is set and *cs1* $\ne$ *cd*.
  *
  * ## Notes
  *
@@ -834,6 +912,9 @@ function clause execute (CCopyType(cd, cs1, cs2)) = {
     RETIRE_FAIL
   } else if cs2_otype >= cs1_top then {
     handle_cheri_reg_exception(CapEx_LengthViolation, cs1);
+    RETIRE_FAIL
+  } else if cs1_val.linear & (cd != cs1) then {
+    handle_cheri_reg_exception(CapEx_LinearityViolation, cs1);
     RETIRE_FAIL
   } else {
     let (success, cap) = setCapAddr(cs1_val, to_bits(cap_addr_width, cs2_otype));
@@ -933,6 +1014,7 @@ union clause ast = CSeal : (regidx, regidx, regidx)
  *   - *cs2*.**address** $\lt$ *cs2*.**base**.
  *   - *cs2*.**address** $\ge$ *cs2*.**top**.
  *   - *cs2*.**address** $\gt$ [cap_max_otype].
+ *   - *cs1*.**linear** is set and *cs1* $\ne$ *cd*.
  */
 function clause execute (CSeal(cd, cs1, cs2)) = {
   let cs1_val = C(cs1);
@@ -963,6 +1045,9 @@ function clause execute (CSeal(cd, cs1, cs2)) = {
   } else if cs2_cursor > cap_max_otype then {
     handle_cheri_reg_exception(CapEx_LengthViolation, cs2);
     RETIRE_FAIL
+  } else if cs1_val.linear & (cd != cs1) then {
+    handle_cheri_reg_exception(CapEx_LinearityViolation, cs1);
+    RETIRE_FAIL
   } else {
     C(cd) = sealCap(cs1_val, to_bits(cap_otype_width, cs2_cursor));
     RETIRE_SUCCESS
@@ -986,6 +1071,7 @@ union clause ast = CCSeal : (regidx, regidx, regidx)
  *   - *cs2*.**sealed** is set.
  *   - *cs2*.**perms** does not grant **Permit_Seal**.
  *   - *cs2*.**address** $\gt$ [cap_max_otype].
+ *   - *cs1*.**linear** is set and *cs1* $\ne$ *cd*.
  *
  * ## Notes
  *
@@ -1019,6 +1105,9 @@ function clause execute (CCSeal(cd, cs1, cs2)) = {
   let (cs2_base, cs2_top) = getCapBounds(cs2_val);
   if not (cs1_val.tag) then {
     handle_cheri_reg_exception(CapEx_TagViolation, cs1);
+    RETIRE_FAIL
+  } else if cs1_val.linear & (cd != cs1) then {
+    handle_cheri_reg_exception(CapEx_LinearityViolation, cs1);
     RETIRE_FAIL
   } else if not (cs2_val.tag) then {
     /* CCopyType may not have been able to represent the result */
@@ -1070,6 +1159,7 @@ union clause ast = CUnseal : (regidx, regidx, regidx)
  *   - *cs2*.**perms** does not grant **Permit_Unseal**.
  *   - *cs2*.**address** $\lt$ *cs2*.**base**.
  *   - *cs2*.**address** $\ge$ *cs2*.**top**.
+ *   - *cs1*.**linear** is set and *cs1* $\ne$ *cd*.
  */
 function clause execute (CUnseal(cd, cs1, cs2)) = {
   let cs1_val = C(cs1);
@@ -1103,6 +1193,9 @@ function clause execute (CUnseal(cd, cs1, cs2)) = {
   } else if cs2_cursor >= cs2_top then {
     handle_cheri_reg_exception(CapEx_LengthViolation, cs2);
     RETIRE_FAIL
+  } else if cs1_val.linear & (cd != cs1) then {
+    handle_cheri_reg_exception(CapEx_LinearityViolation, cs1);
+    RETIRE_FAIL
   } else {
     let new_global = cs1_val.global & cs2_val.global;
     C(cd) = {unsealCap(cs1_val) with global=new_global};
@@ -1121,6 +1214,7 @@ union clause ast = CSealEntry : (regidx, regidx)
  *   - *cs1*.**tag** is not set.
  *   - *cs1* is sealed.
  *   - *cs1*.**perms** does not grant **Permit_Execute**.
+ *   - *cs1*.**linear** is set and *cs1* $\ne$ *cd*.
  */
 function clause execute (CSealEntry(cd, cs1)) = {
   let cs1_val = C(cs1);
@@ -1132,6 +1226,9 @@ function clause execute (CSealEntry(cd, cs1)) = {
     RETIRE_FAIL
   } else if not (cs1_val.permit_execute) then {
     handle_cheri_reg_exception(CapEx_PermitExecuteViolation, cs1);
+    RETIRE_FAIL
+  } else if cs1_val.linear & (cd != cs1) then {
+    handle_cheri_reg_exception(CapEx_LinearityViolation, cs1);
     RETIRE_FAIL
   } else {
     C(cd) = sealCap(cs1_val, to_bits(cap_otype_width, otype_sentry));
@@ -1175,6 +1272,8 @@ union clause ast = CInvoke : (regidx, regidx)
  *   implement function-call semantics or message passing) may need to perform
  *   multiple memory reads and writes, which might take multiple cycles and
  *   complicate control logic.
+ *
+ * - If *cs1* or *cs2* has its linear bit set, its tag will be cleared.
  */
 function clause execute (CInvoke(cs1, cs2)) = {
   let cs1_val = C(cs1);
@@ -1221,6 +1320,10 @@ function clause execute (CInvoke(cs1, cs2)) = {
     C(31) = unsealCap(cs2_val);
     nextPC = newPC;
     nextPCC = unsealCap(cs1_val);
+    if cs1_val.linear then
+      C(cs1) = invalidateCap(cs1_val);
+    if cs2_val.linear then
+      C(cs2) = invalidateCap(cs2_val);
     RETIRE_SUCCESS
   }
 }
@@ -1242,6 +1345,10 @@ union clause ast = CJALR : (regidx, regidx)
  *   - *cs1*.**address** $+$ min_instruction_bytes $\gt$ *cs1*.**top**.
  *   - *cs1*.**base** is unaligned.
  *   - *cs1*.**address** is unaligned, ignoring bit 0.
+ *
+ * ## Notes
+ *
+ * -If *cs1* has its linear bit set, its tag will be cleared.
  */
 function clause execute(CJALR(cd, cs1)) = {
   let cs1_val = C(cs1);
@@ -1272,6 +1379,8 @@ function clause execute(CJALR(cd, cs1)) = {
     C(cd) = sealCap(linkCap, to_bits(cap_otype_width, otype_sentry));
     nextPC = newPC;
     nextPCC = unsealCap(cs1_val);
+    if cs1_val.linear then
+      C(cs1) = invalidateCap(cs1_val);
     RETIRE_SUCCESS
   }
 }
@@ -1378,7 +1487,7 @@ function handle_load_cap_via_cap(cd, auth_idx, auth_val, vaddrBits) = {
         MemValue(v) => {
           let cr = if ptw_info.ptw_lc == PTW_LC_CLEAR
                    then {v with tag = false} /* strip the tag */
-                   else {v with tag = v.tag & auth_val.permit_load_cap};
+                   else {v with tag = v.tag & auth_val.permit_load_cap & not(v.linear)};
           C(cd) = cr;
           RETIRE_SUCCESS
         },
@@ -1404,6 +1513,11 @@ union clause ast = LoadCapDDC : (regidx, regidx)
  *   - **DDC**.**address** $+$ *rs1* $+$ **CLEN** $/$ 8 $\gt$ **DDC**.**top**.
  *   - **DDC**.**address** $+$ *rs1* is unaligned, regardless of whether the
  *     implementation supports unaligned data accesses.
+ *
+ * ## Notes
+ *
+ * - If the loaded　capability has its linear bit set, the tag of *cd* will
+ *   be cleared.
  */
 function clause execute (LoadCapDDC(cd, rs1)) = {
   let ddc_val = DDC;
@@ -1427,6 +1541,11 @@ union clause ast = LoadCapCap : (regidx, regidx)
  *   - *cs1*.**address** $+$ **CLEN** $/$ 8 $\gt$ *cs1*.**top**.
  *   - *cs1*.**address** is unaligned, regardless of whether the implementation
  *     supports unaligned data accesses.
+ *
+ * ## Notes
+ *
+ * - If the loaded　capability has its linear bit set, the tag of *cd* will
+ *   be cleared.
  */
 function clause execute (LoadCapCap(cd, cs1)) = {
   let cs1_val = C(cs1);
@@ -1612,7 +1731,7 @@ if not(auth_val.tag) then {
                    else {
                      /* the Sail model currently reserves virtual addresses */
                      load_reservation(addr);
-                     {v with tag = v.tag & auth_val.permit_load_cap}
+                     {v with tag = v.tag & auth_val.permit_load_cap & not(v.linear)}
                    };
           C(cd) = cr;
           RETIRE_SUCCESS
@@ -1792,7 +1911,8 @@ function handle_store_cap_via_cap(cs2, auth_idx, auth_val, vaddrBits) = {
         MemValue(_) => {
           let res : MemoryOpResult(bool) = mem_write_cap(addr, cs2_val, aq, rl, false);
           match (res) {
-            MemValue(true)  => RETIRE_SUCCESS,
+            MemValue(true)  => {if cs2_val.linear then C(cs2) = invalidateCap(cs2_val);
+                                RETIRE_SUCCESS},
             MemValue(false) => internal_error("store got false from mem_write_value"),
             MemException(e) => { handle_mem_exception(vaddrBits, e); RETIRE_FAIL }
           }
@@ -1819,6 +1939,10 @@ union clause ast = StoreCapDDC : (regidx, regidx)
  *     *cs2*.**tag** is set and *cs2*.**perms** does not grant **Global**.
  *   - **DDC**.**address** $+$ *rs1* $\lt$ **DDC**.**base**.
  *   - **DDC**.**address** $+$ *rs1* $+$ **CLEN** $/$ 8 $\gt$ **DDC**.**top**.
+ *
+ * ## Notes
+ *
+ * - If *cs2* has its linear bit set, its tag will be cleared.
  */
 function clause execute (StoreCapDDC(cs2, rs1)) = {
   let ddc_val = DDC;
@@ -1843,6 +1967,10 @@ union clause ast = StoreCapCap : (regidx, regidx)
  *     *cs2*.**tag** is set and *cs2*.**perms** does not grant **Global**.
  *   - *cs1*.**address** $\lt$ *cs1*.**base**.
  *   - *cs1*.**address** $+$ **CLEN** $\gt$ *cs1*.**top**.
+ *
+ * ## Notes
+ *
+ * - If *cs2* has its linear bit set, its tag will be cleared.
  */
 function clause execute (StoreCapCap(cs2, cs1)) = {
   let cs1_val = C(cs1);
@@ -1854,11 +1982,15 @@ union clause ast = AUIPCC : (bits(20), regidx)
 /*!
  * Capability register *cd* is replaced with the contents of **PCC**, with the
  * **address** replaced with **PCC**.**address** $+$ *imm* $\times$ 4096.
+ *
+ * ## Notes
+ *
+ * -If **PCC** has its linear bit set, the tag of *cd* will be cleared.
  */
 function clause execute AUIPCC(imm, cd) = {
   let off : xlenbits = EXTS(imm @ 0x000);
   let (representable, newCap) = setCapAddr(PCC, PC + off);
-  if representable then
+  if representable & not(newCap.linear) then
     C(cd) = newCap
   else
     C(cd) = invalidateCap(newCap);
@@ -1895,6 +2027,11 @@ union clause ast = LoadCapImm : (regidx, regidx, bits(12))
  *   - *cs1*.**address** $+$ *imm* $+$ **CLEN** $/$ 8 $\gt$ *cs1*.**top**.
  *   - *cs1*.**address** $+$ *imm* is unaligned, regardless of whether the
  *     implementation supports unaligned data accesses.
+ *
+ * ## Notes
+ *
+ * - If the loaded　capability has its linear bit set, the tag of *cd* will
+ *   be cleared.
  */
 function clause execute LoadCapImm(cd, rs1_cs1, imm) = {
   let offset : xlenbits = EXTS(imm);
@@ -1933,6 +2070,10 @@ union clause ast = StoreCapImm : (regidx, regidx, bits(12))
  *     *cs2*.**tag** is set and *cs2*.**perms** does not grant **Global**.
  *   - *cs1*.**address** $+$ *imm* $\lt$ *cs1*.**base**.
  *   - *cs1*.**address** $+$ *imm* $+$ **CLEN** $/$ 8 $\gt$ *cs1*.**top**.
+ *
+ * ## Notes
+ *
+ * - If *cs2* has its linear bit set, its tag will be cleared.
  */
 function clause execute StoreCapImm(cs2, rs1_cs1, imm) = {
   let offset : xlenbits = EXTS(imm);
