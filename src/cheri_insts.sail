@@ -1459,8 +1459,8 @@ function clause execute (LoadDataCap(rd, cs1, is_unsigned, width)) = {
   handle_load_data_via_cap(rd, 0b0 @ cs1, cs1_val, vaddr, is_unsigned, width)
 }
 
-val handle_load_cap_via_cap : (regidx, capreg_idx, Capability, xlenbits) -> Retired effect {escape, rmem, rmemt, rreg, wmv, wmvt, wreg}
-function handle_load_cap_via_cap(cd, auth_idx, auth_val, vaddrBits) = {
+val handle_load_cap_via_cap : (regidx, capreg_idx, Capability, xlenbits, bool) -> Retired effect {escape, eamem, rmem, rmemt, rreg, wmv, wmvt, wreg}
+function handle_load_cap_via_cap(cd, auth_idx, auth_val, vaddrBits, linearInst) = {
   let aq : bool = false;
   let rl : bool = false;
   if not(auth_val.tag) then {
@@ -1487,9 +1487,29 @@ function handle_load_cap_via_cap(cd, auth_idx, auth_val, vaddrBits) = {
         MemValue(v) => {
           let cr = if ptw_info.ptw_lc == PTW_LC_CLEAR
                    then {v with tag = false} /* strip the tag */
-                   else {v with tag = v.tag & auth_val.permit_load_cap & not(v.linear)};
-          C(cd) = cr;
-          RETIRE_SUCCESS
+                   else {v with tag = v.tag & auth_val.permit_load_cap & (not(v.linear) | linearInst)};
+          if linearInst then {
+            match translateAddr(vaddrBits, Write(Cap)) {
+              TR_Failure(e, _) => { handle_mem_exception(vaddrBits, e); RETIRE_FAIL },
+              TR_Address(waddr, _) => {
+                let eares : MemoryOpResult(unit) = mem_write_ea_cap(waddr, aq, rl, false);
+                match (eares) {
+                  MemException(e) => { handle_mem_exception(vaddrBits, e); RETIRE_FAIL },
+                  MemValue(_) => {
+                    let res : MemoryOpResult(bool) = mem_write_cap(waddr, {cr with tag = false}, aq, rl, false);
+                    match (res) {
+                      MemValue(true)  => {C(cd) = cr;
+                                          RETIRE_SUCCESS},
+                      MemValue(false) => internal_error("store got false from mem_write_value"),
+                      MemException(e) => { handle_mem_exception(vaddrBits, e); RETIRE_FAIL }
+                    }
+                  }
+                }
+              }
+            }
+          } else {
+            RETIRE_SUCCESS
+          }
         },
         MemException(e) => {handle_mem_exception(vaddrBits, e); RETIRE_FAIL }
       }
@@ -1522,7 +1542,7 @@ union clause ast = LoadCapDDC : (regidx, regidx)
 function clause execute (LoadCapDDC(cd, rs1)) = {
   let ddc_val = DDC;
   let vaddr = ddc_val.address + X(rs1);
-  handle_load_cap_via_cap(cd, DDC_IDX, ddc_val, vaddr)
+  handle_load_cap_via_cap(cd, DDC_IDX, ddc_val, vaddr, false)
 }
 
 union clause ast = LoadCapCap : (regidx, regidx)
@@ -1550,7 +1570,31 @@ union clause ast = LoadCapCap : (regidx, regidx)
 function clause execute (LoadCapCap(cd, cs1)) = {
   let cs1_val = C(cs1);
   let vaddr = cs1_val.address;
-  handle_load_cap_via_cap(cd, 0b0 @ cs1, cs1_val, vaddr)
+  handle_load_cap_via_cap(cd, 0b0 @ cs1, cs1_val, vaddr, false)
+}
+
+union clause ast = LinearLoadCapCap : (regidx, regidx)
+/*!
+ * Capability register *cd* is replaced with the capability located in memory
+ * at *cs1*.**address**, and if *cs1*.**perms** does not grant
+ * **Permit_Load_Capability** then *cd*.**tag** is cleared. The tag of the
+ * capability at *cs1*.**address** is cleared.
+ *
+ * ## Exceptions
+ *
+ * An exception is raised if:
+ *   - *cs1*.**tag** is not set.
+ *   - *cs1* is sealed.
+ *   - *cs1*.**perms** does not grant **Permit_Load**.
+ *   - *cs1*.**address** $\lt$ *cs1*.**base**.
+ *   - *cs1*.**address** $+$ **CLEN** $/$ 8 $\gt$ *cs1*.**top**.
+ *   - *cs1*.**address** is unaligned, regardless of whether the implementation
+ *     supports unaligned data accesses.
+ */
+function clause execute (LinearLoadCapCap(cd, cs1)) = {
+  let cs1_val = C(cs1);
+  let vaddr = cs1_val.address;
+  handle_load_cap_via_cap(cd, 0b0 @ cs1, cs1_val, vaddr, true)
 }
 
 union clause ast = CLoadTags : (regidx, regidx)
@@ -1876,8 +1920,8 @@ function clause execute (StoreDataCap(rs2, cs1, width)) = {
   handle_store_data_via_cap(rs2, 0b0 @ cs1, cs1_val, vaddr, width)
 }
 
-val handle_store_cap_via_cap : (regidx, capreg_idx, Capability, xlenbits) -> Retired effect {eamem, escape, rmem, rmemt, rreg, wmv, wreg, wmvt}
-function handle_store_cap_via_cap(cs2, auth_idx, auth_val, vaddrBits) = {
+val handle_store_cap_via_cap : (regidx, capreg_idx, Capability, xlenbits, bool) -> Retired effect {eamem, escape, rmem, rmemt, rreg, wmv, wreg, wmvt}
+function handle_store_cap_via_cap(cs2, auth_idx, auth_val, vaddrBits, linearInst) = {
   let cs2_val = C(cs2);
   let aq : bool = false;
   let rl : bool = false;
@@ -1911,7 +1955,7 @@ function handle_store_cap_via_cap(cs2, auth_idx, auth_val, vaddrBits) = {
         MemValue(_) => {
           let res : MemoryOpResult(bool) = mem_write_cap(addr, cs2_val, aq, rl, false);
           match (res) {
-            MemValue(true)  => {if cs2_val.linear then C(cs2) = invalidateCap(cs2_val);
+            MemValue(true)  => {if cs2_val.linear | linearInst then C(cs2) = invalidateCap(cs2_val);
                                 RETIRE_SUCCESS},
             MemValue(false) => internal_error("store got false from mem_write_value"),
             MemException(e) => { handle_mem_exception(vaddrBits, e); RETIRE_FAIL }
@@ -1947,7 +1991,7 @@ union clause ast = StoreCapDDC : (regidx, regidx)
 function clause execute (StoreCapDDC(cs2, rs1)) = {
   let ddc_val = DDC;
   let vaddr = ddc_val.address + X(rs1);
-  handle_store_cap_via_cap(cs2, DDC_IDX, ddc_val, vaddr)
+  handle_store_cap_via_cap(cs2, DDC_IDX, ddc_val, vaddr, false)
 }
 
 union clause ast = StoreCapCap : (regidx, regidx)
@@ -1975,7 +2019,31 @@ union clause ast = StoreCapCap : (regidx, regidx)
 function clause execute (StoreCapCap(cs2, cs1)) = {
   let cs1_val = C(cs1);
   let vaddr = cs1_val.address;
-  handle_store_cap_via_cap(cs2, 0b0 @ cs1, cs1_val, vaddr)
+  handle_store_cap_via_cap(cs2, 0b0 @ cs1, cs1_val, vaddr, false)
+}
+
+union clause ast = LinearStoreCapCap : (regidx, regidx)
+/*!
+ * The capability located in memory at *cs1*.**address** is replaced with
+ * capability register *cs2*. The tag of *cs2* is cleared.
+ *
+ * ## Exceptions
+ *
+ * An exception is raised if:
+ *   - *cs1*.**tag** is not set.
+ *   - *cs1* is sealed.
+ *   - *cs1*.**perms** does not grant **Permit_Store**.
+ *   - *cs1*.**perms** does not grant **Permit_Store_Capability** and
+ *     *cs2*.**tag** is set.
+ *   - *cs1*.**perms** does not grant **Permit_Store_Local_Capability**,
+ *     *cs2*.**tag** is set and *cs2*.**perms** does not grant **Global**.
+ *   - *cs1*.**address** $\lt$ *cs1*.**base**.
+ *   - *cs1*.**address** $+$ **CLEN** $\gt$ *cs1*.**top**.
+ */
+function clause execute (LinearStoreCapCap(cs2, cs1)) = {
+  let cs1_val = C(cs1);
+  let vaddr = cs1_val.address;
+  handle_store_cap_via_cap(cs2, 0b0 @ cs1, cs1_val, vaddr, true)
 }
 
 union clause ast = AUIPCC : (bits(20), regidx)
@@ -2036,7 +2104,7 @@ union clause ast = LoadCapImm : (regidx, regidx, bits(12))
 function clause execute LoadCapImm(cd, rs1_cs1, imm) = {
   let offset : xlenbits = EXTS(imm);
   let (auth_val, vaddr, auth_idx) = get_cheri_mode_cap_addr(rs1_cs1, offset);
-  handle_load_cap_via_cap(cd, auth_idx, auth_val, vaddr)
+  handle_load_cap_via_cap(cd, auth_idx, auth_val, vaddr, false)
 }
 
 union clause ast = StoreCapImm : (regidx, regidx, bits(12))
@@ -2078,7 +2146,7 @@ union clause ast = StoreCapImm : (regidx, regidx, bits(12))
 function clause execute StoreCapImm(cs2, rs1_cs1, imm) = {
   let offset : xlenbits = EXTS(imm);
   let (auth_val, vaddr, auth_idx) = get_cheri_mode_cap_addr(rs1_cs1, offset);
-  handle_store_cap_via_cap(cs2, auth_idx, auth_val, vaddr)
+  handle_store_cap_via_cap(cs2, auth_idx, auth_val, vaddr, false)
 }
 
 val handle_store_cond_data_via_cap : (regidx, capreg_idx, Capability, xlenbits, word_width) -> Retired effect {eamem, escape, rmem, rmemt, rreg, wmv, wmvt, wreg}
@@ -2413,6 +2481,9 @@ mapping clause encdec = LoadDataCap(rd, cs1, true, DOUBLE)  if (haveXcheri() & h
 mapping clause encdec = LoadCapCap(cd, cs1)                 if (haveXcheri() & sizeof(xlen) == 64) <-> 0b1111101 @ 0b11111 @ cs1 @ 0b000 @ cd @ 0b1011011 if (haveXcheri() & sizeof(xlen) == 64)  /* lc.cap */
 mapping clause encdec = LoadCapCap(cd, cs1)                 if (haveXcheri() & sizeof(xlen) == 32) <-> 0b1111101 @ 0b01011 @ cs1 @ 0b000 @ cd @ 0b1011011 if (haveXcheri() & sizeof(xlen) == 32)  /* lc.cap */
 
+mapping clause encdec = LinearLoadCapCap(cd, cs1)   if (haveXcheri() & sizeof(xlen) == 64) <-> 0b1111101 @ 0b00111 @ cs1 @ 0b000 @ cd @ 0b1011011 if (haveXcheri() & sizeof(xlen) == 64)  /* ll.cap */
+mapping clause encdec = LinearLoadCapCap(cd, cs1)   if (haveXcheri() & sizeof(xlen) == 32) <-> 0b1111101 @ 0b01110 @ cs1 @ 0b000 @ cd @ 0b1011011 if (haveXcheri() & sizeof(xlen) == 32)  /* ll.cap */
+
 mapping clause encdec = LoadResDataDDC(rd, rs1, BYTE)   if (haveXcheri() & haveAtomics()) <-> 0b1111101 @ 0b10000 @ rs1 @ 0b000 @ rd @ 0b1011011 if (haveXcheri() & haveAtomics())  /* lr.b.ddc */
 mapping clause encdec = LoadResDataDDC(rd, rs1, HALF)   if (haveXcheri() & haveAtomics()) <-> 0b1111101 @ 0b10001 @ rs1 @ 0b000 @ rd @ 0b1011011 if (haveXcheri() & haveAtomics())  /* lr.h.ddc */
 mapping clause encdec = LoadResDataDDC(rd, rs1, WORD)   if (haveXcheri() & haveAtomics()) <-> 0b1111101 @ 0b10010 @ rs1 @ 0b000 @ rd @ 0b1011011 if (haveXcheri() & haveAtomics())  /* lr.w.ddc */
@@ -2441,6 +2512,9 @@ mapping clause encdec = StoreDataCap(rs2, cs1, DOUBLE)  if (haveXcheri() & haveR
 mapping clause encdec = StoreCapCap(cs2, cs1)           if (haveXcheri() & sizeof(xlen) == 64) <-> 0b1111100 @ cs2 @ cs1 @ 0b000 @ 0b01100 @ 0b1011011 if (haveXcheri() & sizeof(xlen) == 64) /* sc.cap */
 mapping clause encdec = StoreCapCap(cs2, cs1)           if (haveXcheri() & sizeof(xlen) == 32) <-> 0b1111100 @ cs2 @ cs1 @ 0b000 @ 0b01011 @ 0b1011011 if (haveXcheri() & sizeof(xlen) == 32) /* sc.cap */
 
+mapping clause encdec = LinearStoreCapCap(cs2, cs1) if (haveXcheri() & sizeof(xlen) == 64) <-> 0b1111100 @ cs2 @ cs1 @ 0b000 @ 0b01101 @ 0b1011011 if (haveXcheri() & sizeof(xlen) == 64) /* sl.cap */
+mapping clause encdec = LinearStoreCapCap(cs2, cs1) if (haveXcheri() & sizeof(xlen) == 32) <-> 0b1111100 @ cs2 @ cs1 @ 0b000 @ 0b01100 @ 0b1011011 if (haveXcheri() & sizeof(xlen) == 32) /* sl.cap */
+
 mapping clause encdec = StoreCondDataDDC(rs2, rs1, BYTE)   if (haveXcheri() & haveAtomics()) <-> 0b1111100 @ rs2 @ rs1 @ 0b000 @ 0b10000 @ 0b1011011 if (haveXcheri() & haveAtomics()) /* sc.b.ddc */
 mapping clause encdec = StoreCondDataDDC(rs2, rs1, HALF)   if (haveXcheri() & haveAtomics()) <-> 0b1111100 @ rs2 @ rs1 @ 0b000 @ 0b10001 @ 0b1011011 if (haveXcheri() & haveAtomics()) /* sc.h.ddc */
 mapping clause encdec = StoreCondDataDDC(rs2, rs1, WORD)   if (haveXcheri() & haveAtomics()) <-> 0b1111100 @ rs2 @ rs1 @ 0b000 @ 0b10010 @ 0b1011011 if (haveXcheri() & haveAtomics()) /* sc.w.ddc */
@@ -2460,6 +2534,8 @@ mapping clause assembly = LoadDataCap(rd, cs1, u, w) <-> "l" ^ size_mnemonic(w) 
 mapping clause assembly = LoadCapDDC(cd, rs1)        <-> "lc.ddc" ^ spc() ^ cap_reg_name(cd) ^ sep() ^ "(" ^ opt_spc() ^ reg_name(rs1) ^ opt_spc() ^ ")"
 mapping clause assembly = LoadCapCap(cd, cs1)        <-> "lc.cap" ^ spc() ^ cap_reg_name(cd) ^ sep() ^ "(" ^ opt_spc() ^ cap_reg_name(cs1) ^ opt_spc() ^ ")"
 
+mapping clause assembly = LinearLoadCapCap(cd, cs1)  <-> "ll.cap" ^ spc() ^ cap_reg_name(cd) ^ sep() ^ "(" ^ opt_spc() ^ cap_reg_name(cs1) ^ opt_spc() ^ ")"
+
 mapping clause assembly = LoadResDataDDC(rd, cs1, w) <-> "lr." ^ size_mnemonic(w) ^ ".ddc" ^ spc() ^ reg_name(rd) ^ sep() ^ "(" ^ opt_spc() ^ cap_reg_name(cs1) ^ opt_spc() ^ ")"
 mapping clause assembly = LoadResCapDDC(cd, cs1)     <-> "lr.c.ddc" ^ spc() ^ cap_reg_name(cd) ^ sep() ^ "(" ^ opt_spc() ^ cap_reg_name(cs1) ^ opt_spc() ^ ")"
 mapping clause assembly = LoadResCap(rd, cs1, w)     <-> "lr." ^ size_mnemonic(w) ^ ".cap" ^ spc() ^ reg_name(rd) ^ sep() ^ "(" ^ opt_spc() ^ cap_reg_name(cs1) ^ opt_spc() ^ ")"
@@ -2469,6 +2545,8 @@ mapping clause assembly = StoreDataDDC(rs2, rs1, w) <-> "s" ^ size_mnemonic(w) ^
 mapping clause assembly = StoreDataCap(rs2, cs1, w) <-> "s" ^ size_mnemonic(w) ^ ".cap" ^ spc() ^ reg_name(rs2) ^ sep() ^ "(" ^ opt_spc() ^ cap_reg_name(cs1) ^ opt_spc() ^ ")"
 mapping clause assembly = StoreCapDDC(cs2, rs1)     <-> "sc.ddc" ^ spc() ^ cap_reg_name(cs2) ^ sep() ^ "(" ^ opt_spc() ^ reg_name(rs1) ^ opt_spc() ^ ")"
 mapping clause assembly = StoreCapCap(cs2, cs1)     <-> "sc.cap" ^ spc() ^ cap_reg_name(cs2) ^ sep() ^ "(" ^ opt_spc() ^ cap_reg_name(cs1) ^ opt_spc() ^ ")"
+
+mapping clause assembly = LinearStoreCapCap(cs2, cs1)   <-> "sl.cap" ^ spc() ^ cap_reg_name(cs2) ^ sep() ^ "(" ^ opt_spc() ^ cap_reg_name(cs1) ^ opt_spc() ^ ")"
 
 mapping clause assembly = StoreCondDataDDC(rs2, rs1, w) <-> "sc." ^ size_mnemonic(w) ^ ".ddc" ^ spc() ^ reg_name(rs2) ^ sep() ^ "(" ^ opt_spc() ^ reg_name(rs1) ^ opt_spc() ^ ")"
 mapping clause assembly = StoreCondCapDDC(cs2, rs1)     <-> "sc.c.ddc" ^ spc() ^ cap_reg_name(cs2) ^ sep() ^ "(" ^ opt_spc() ^ reg_name(rs1) ^ opt_spc() ^ ")"
