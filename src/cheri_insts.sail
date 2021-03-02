@@ -43,6 +43,7 @@ union clause ast = CGetSealed : (regidx, regidx)
 union clause ast = CGetOffset : (regidx, regidx)
 union clause ast = CGetAddr   : (regidx, regidx)
 union clause ast = CGetFlags  : (regidx, regidx)
+union clause ast = CGetLinear : (regidx, regidx)
 
 /*!
  * The least significant [cap_hperms_width] bits of integer register *rd* are
@@ -148,6 +149,16 @@ function clause execute (CGetSealed(rd, cs1)) = {
 function clause execute (CGetAddr(rd, cs1)) = {
   let capVal = C(cs1);
   X(rd) = capVal.address;
+  RETIRE_SUCCESS
+}
+
+/*!
+ * The low bit of integer register *rd* is set to the **linear** field of *cs1*.
+ * All other bits of *rd* are cleared.
+ */
+function clause execute (CGetLinear(rd, cs1)) = {
+  let capVal = C(cs1);
+  X(rd) = EXTZ(getCapLinearity(capVal));
   RETIRE_SUCCESS
 }
 
@@ -674,6 +685,31 @@ function clause execute (CMove(cd, cs1)) = {
   C(cd) = cs1_val;
   if cs1_val.linear & (cd != cs1) then C(cs1) = invalidateCap(cs1_val);
   RETIRE_SUCCESS
+}
+
+union clause ast = CMakeLinear : (regidx, regidx)
+/*!
+ * Capability register *cd* is replaced with capability register *cs1* with
+ * the **linear** field set to 1.
+ *
+ * ## Exceptions
+ *
+ * An exception is raised if:
+ *   - *cs1*.**tag** is not set.
+ *   - *cs1*.**linear** is set and *cs1* $\ne$ *cd*.
+ */
+function clause execute (CMakeLinear(cd, cs1)) = {
+  let cs1_val = C(cs1);
+  if not (cs1_val.tag) then {
+    handle_cheri_reg_exception(CapEx_TagViolation, cs1);
+    RETIRE_FAIL
+  } else if cs1_val.linear & (cd != cs1) then {
+    handle_cheri_reg_exception(CapEx_LinearityViolation, cs1);
+    RETIRE_FAIL
+  } else {
+    C(cd) = setCapLinearity(cs1_val, truncate(0b1, cap_linear_width));
+    RETIRE_SUCCESS
+  }
 }
 
 union clause ast = Clear : (bits(2), bits(8))
@@ -2356,10 +2392,14 @@ mapping clause encdec = CGetOffset(rd, cs1) if (haveXcheri()) <-> 0b1111111 @ 0b
 mapping clause encdec = CGetFlags(rd, cs1)  if (haveXcheri()) <-> 0b1111111 @ 0b00111 @ cs1 @ 0b000 @ rd @ 0b1011011 if (haveXcheri())
 mapping clause encdec = CGetAddr(rd, cs1)   if (haveXcheri()) <-> 0b1111111 @ 0b01111 @ cs1 @ 0b000 @ rd @ 0b1011011 if (haveXcheri())
 
+mapping clause encdec = CGetLinear(rd, cs1) if (haveXcheri()) <-> 0b1111111 @ 0b10100 @ cs1 @ 0b000 @ rd @ 0b1011011 if (haveXcheri())
+
 mapping clause encdec = CMove(cd, cs1)      if (haveXcheri()) <-> 0b1111111 @ 0b01010 @ cs1 @ 0b000 @ cd @ 0b1011011 if (haveXcheri())
 mapping clause encdec = CClearTag(cd, cs1)  if (haveXcheri()) <-> 0b1111111 @ 0b01011 @ cs1 @ 0b000 @ cd @ 0b1011011 if (haveXcheri())
 mapping clause encdec = CJALR(cd, cs1)      if (haveXcheri()) <-> 0b1111111 @ 0b01100 @ cs1 @ 0b000 @ cd @ 0b1011011 if (haveXcheri())
 mapping clause encdec = CSealEntry(cd, cs1) if (haveXcheri()) <-> 0b1111111 @ 0b10001 @ cs1 @ 0b000 @ cd @ 0b1011011 if (haveXcheri())
+
+mapping clause encdec = CMakeLinear(cd, cs1)  if (haveXcheri()) <-> 0b1111111 @ 0b10011 @ cs1 @ 0b000 @ cd @ 0b1011011 if (haveXcheri())
 
 mapping clause encdec = CLoadTags(rd, cs1) if (haveXcheri()) <-> 0b1111111 @ 0b10010 @ cs1 @ 0b000 @ rd @ 0b1011011 if (haveXcheri())
 
@@ -2380,11 +2420,15 @@ mapping clause assembly = CGetSealed(rd, cs1) <-> "cgetsealed" ^ spc() ^ reg_nam
 mapping clause assembly = CGetOffset(rd, cs1) <-> "cgetoffset" ^ spc() ^ reg_name(rd) ^ sep() ^ cap_reg_name(cs1)
 mapping clause assembly = CGetAddr(rd, cs1)   <-> "cgetaddr"   ^ spc() ^ reg_name(rd) ^ sep() ^ cap_reg_name(cs1)
 
+mapping clause assembly = CGetLinear(rd, cs1) <-> "cgetlinear" ^ spc() ^ reg_name(rd) ^ sep() ^ cap_reg_name(cs1)
+
 mapping clause assembly = CMove(cd, cs1)      <-> "cmove"      ^ spc() ^ cap_reg_name(cd) ^ sep() ^ cap_reg_name(cs1)
 mapping clause assembly = CClearTag(cd, cs1)  <-> "ccleartag"  ^ spc() ^ cap_reg_name(cd) ^ sep() ^ cap_reg_name(cs1)
 mapping clause assembly = CJALR(0b00000, cs1) <-> "cjr"        ^ spc() ^ cap_reg_name(cs1)
 mapping clause assembly = CJALR(cd, cs1)      <-> "cjalr"      ^ spc() ^ cap_reg_name(cd) ^ sep() ^ cap_reg_name(cs1)
 mapping clause assembly = CSealEntry(cd, cs1) <-> "csealentry" ^ spc() ^ cap_reg_name(cd) ^ sep() ^ cap_reg_name(cs1)
+
+mapping clause assembly = CMakeLinear(cd, cs1) <-> "cmakelinear" ^ spc() ^ cap_reg_name(cd) ^ sep() ^ cap_reg_name(cs1)
 
 mapping clause assembly = CLoadTags(rd, cs1) <-> "cloadtags" ^ spc() ^ reg_name(rd) ^ sep() ^ "(" ^ cap_reg_name(cs1) ^ ")"
 
