@@ -175,6 +175,7 @@ union clause ast = CSpecialRW : (regidx, screg, regidx)
  *   - *scr* is only accessible to a higher privilege mode.
  *   - *scr* requires **Permit_Access_System_Registers** and that is not
  *     granted by **PCC**.**perms**.
+ *   - *cs1*.**linear** is set, *cs1* is not **C0** and *cs1* $\ne$ *cd*.
  *
  * ## Notes
  *
@@ -186,8 +187,7 @@ union clause ast = CSpecialRW : (regidx, screg, regidx)
  *   transitions to domains without **Permit_Access_System_Registers** only
  *   **DDC** should need clearing, which can be done with [CClear].
  *
- * - If *cs1* is not **C0** and has its linear bit set, its tag will be unset.
- *   If *scr* has its linear bit set and *cs1* is is **C0**, the tag of *scr*
+ * - If *scr* has its linear bit set and *cs1* is is **C0**, the tag of *scr*
  *   will be unset.
  */
 function clause execute (CSpecialRW(cd, scr, cs1)) = {
@@ -208,6 +208,7 @@ function clause execute (CSpecialRW(cd, scr, cs1)) = {
     31 => (true, false, Machine, true),
     _  => (false, true, Machine, true)
   };
+  let cs1_val = C(cs1);
   if (not(specialExists) |
       ro & cs1 != zeros() |
       (privLevel_to_bits(cur_privilege) <_u privLevel_to_bits(priv))) then {
@@ -216,8 +217,10 @@ function clause execute (CSpecialRW(cd, scr, cs1)) = {
   } else if (needASR & not(pcc_access_system_regs())) then {
     handle_cheri_cap_exception(CapEx_AccessSystemRegsViolation, 0b1 @ scr);
     RETIRE_FAIL
+  } else if cs1_val.linear & (cd != cs1) & (cs1 != zeros()) then {
+    handle_cheri_reg_exception(CapEx_LinearityViolation, cs1);
+    RETIRE_FAIL
   } else {
-    let cs1_val = C(cs1);
     let scr_val : Capability = match unsigned(scr) {
       0  => {
         let (success, pcc) = setCapAddr(PCC, PC);
@@ -256,11 +259,10 @@ function clause execute (CSpecialRW(cd, scr, cs1)) = {
         30 => MScratchC = cs1_val,
         31 => MEPCC = cs1_val,
         _  => assert(false, "unreachable")
-      };
-      if cs1_val.linear then 
-        C(cs1) = invalidateCap(cs1_val)
+      }
     } else if scr_val.linear then {
       match unsigned(scr) {
+        0  => C(cd) = invalidateCap(scr_val),
         1  => DDC = invalidateCap(scr_val),
         4  => UTCC = legalize_tcc(UTCC, invalidateCap(scr_val)),
         5  => UTDC = invalidateCap(scr_val),
@@ -683,7 +685,8 @@ union clause ast = CMove : (regidx, regidx)
 function clause execute (CMove(cd, cs1)) = {
   let cs1_val = C(cs1);
   C(cd) = cs1_val;
-  if cs1_val.linear & (cd != cs1) then C(cs1) = invalidateCap(cs1_val);
+  if cs1_val.linear & (cd != cs1) then
+    C(cs1) = invalidateCap(cs1_val);
   RETIRE_SUCCESS
 }
 
@@ -1298,6 +1301,7 @@ union clause ast = CInvoke : (regidx, regidx)
  *   - *cs1*.**address** $+$ min_instruction_bytes $\gt$ *cs1*.**top**.
  *   - *cs1*.**base** is unaligned.
  *   - *cs1*.**address** is unaligned, ignoring bit 0.
+ *   - *cs2*.**linear** is set and *cs2* $\ne$ **C31**.
  *
  * ## Notes
  *
@@ -1309,7 +1313,7 @@ union clause ast = CInvoke : (regidx, regidx)
  *   multiple memory reads and writes, which might take multiple cycles and
  *   complicate control logic.
  *
- * - If *cs1* or *cs2* has its linear bit set, its tag will be cleared.
+ * - If *cs1* has its linear bit set, its tag will be cleared.
  */
 function clause execute (CInvoke(cs1, cs2)) = {
   let cs1_val = C(cs1);
@@ -1352,14 +1356,15 @@ function clause execute (CInvoke(cs1, cs2)) = {
   } else if newPC[1] == bitone & ~(haveRVC()) then {
     handle_mem_exception(newPC,  E_Fetch_Addr_Align());
     RETIRE_FAIL
+  } else if (regidx_to_regno(cs2) != 31) then {
+    handle_cheri_reg_exception(CapEx_LinearityViolation, cs1);
+    RETIRE_FAIL
   } else {
     C(31) = unsealCap(cs2_val);
     nextPC = newPC;
     nextPCC = unsealCap(cs1_val);
     if cs1_val.linear then
       C(cs1) = invalidateCap(cs1_val);
-    if cs2_val.linear then
-      C(cs2) = invalidateCap(cs2_val);
     RETIRE_SUCCESS
   }
 }
@@ -1544,6 +1549,7 @@ function handle_load_cap_via_cap(cd, auth_idx, auth_val, vaddrBits, linearInst) 
               }
             }
           } else {
+            C(cd) = cr;
             RETIRE_SUCCESS
           }
         },
